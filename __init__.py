@@ -139,24 +139,42 @@ def _pid_alive(pid: int) -> bool:
     if os.path.isdir(f"/proc/{pid}"):
         return True
     if sys.platform == "win32":
-        import ctypes
-        import ctypes.wintypes as wt
-
-        SYNCHRONIZE = 0x00100000
-        STILL_ACTIVE = 259
-        k32 = ctypes.windll.kernel32
-        k32.OpenProcess.restype = wt.HANDLE
-        h = k32.OpenProcess(SYNCHRONIZE | 0x1000, False, pid)  # + PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            # ERROR_ACCESS_DENIED (5): exists but not ours - treat as alive.
-            return ctypes.get_last_error() == 5 or k32.GetLastError() == 5
         try:
-            code = wt.DWORD()
-            if k32.GetExitCodeProcess(h, ctypes.byref(code)):
-                return code.value == STILL_ACTIVE
+            import ctypes.wintypes as wt
+
+            SYNCHRONIZE = 0x00100000  # noqa: N806 - Win32 API constant
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806 - Win32 API constant
+            STILL_ACTIVE = 259  # noqa: N806 - Win32 API constant
+            ERROR_ACCESS_DENIED = 5  # noqa: N806 - Win32 API constant
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+            k32.OpenProcess.restype = wt.HANDLE
+            k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+            k32.GetExitCodeProcess.restype = wt.BOOL
+            k32.CloseHandle.argtypes = [wt.HANDLE]
+            k32.CloseHandle.restype = wt.BOOL
+            h = k32.OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not h:
+                # NULL handle: process not found (or access denied).
+                # ERROR_ACCESS_DENIED: exists but isn't ours - treat as alive
+                # (don't reap it).
+                return k32.GetLastError() == ERROR_ACCESS_DENIED
+            try:
+                code = wt.DWORD()
+                if k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            # Defensive: never reap what we cannot probe. NEVER fall back to
+            # os.kill on Windows (it is TerminateProcess and kills the target).
+            _log.warning(
+                "_pid_alive: win32 probe failed for pid %s; treating as alive", pid
+            )
             return True
-        finally:
-            k32.CloseHandle(h)
     # macOS/BSD: signal 0 probes existence without side effects.
     try:
         os.kill(pid, 0)
@@ -353,9 +371,9 @@ def _load_dylib() -> ctypes.CDLL:
                 f"than this plugin expects"
             ) from e
 
-        _state.dylib = dylib
-        _state.dylib_mtime = current_mtime
-        _state.dylib_copy_path = load_path
+        _state.dylib = dylib  # pyright: ignore[reportAttributeAccessIssue]
+        _state.dylib_mtime = current_mtime  # pyright: ignore[reportAttributeAccessIssue]
+        _state.dylib_copy_path = load_path  # pyright: ignore[reportAttributeAccessIssue]
         return dylib
 
 
@@ -733,7 +751,7 @@ def _register_atexit_cleanup() -> None:
     flag lives in the process-global holder)."""
     if _state.atexit_registered:
         return
-    _state.atexit_registered = True
+    _state.atexit_registered = True  # pyright: ignore[reportAttributeAccessIssue]
     import atexit
 
     def _cleanup() -> None:
